@@ -2,7 +2,7 @@
 
 Control de un robot diferencial mediante **micro-ROS** sobre **WiFi (UDP)**, utilizando un **ESP32 de 30 pines** y un driver de motores **TB6612FNG**.
 
-## 📁 Estructura del Repositorio
+## Estructura del Repositorio
 
 ```
 ├── firmware/
@@ -22,7 +22,7 @@ Control de un robot diferencial mediante **micro-ROS** sobre **WiFi (UDP)**, uti
 └── README.md
 ```
 
-## 🔧 Hardware
+## Hardware
 
 | Componente | Descripción |
 |---|---|
@@ -55,7 +55,7 @@ Control de un robot diferencial mediante **micro-ROS** sobre **WiFi (UDP)**, uti
 | Radio de rueda (WHEEL_RADIUS) | 0.02 m |
 | Ticks por revolución | 150 (calibrado) |
 
-## 🛠️ Requisitos Previos
+## Requisitos Previos
 
 ### PC (Ubuntu con ROS 2 Jazzy)
 
@@ -81,7 +81,7 @@ sudo docker pull microros/micro-ros-agent:jazzy
    - Descargar la versión `2.0.8-jazzy` desde [GitHub](https://github.com/micro-ROS/micro_ros_arduino/releases)
    - Ir a `Sketch > Include Library > Add .ZIP Library` y seleccionar el archivo descargado
 
-## 📦 Compilación y Flash
+## Compilación y Flash
 
 ### 1. Configurar WiFi y IP del agente
 
@@ -130,7 +130,7 @@ CONECTADO - Robot listo!
 ===========================
 ```
 
-## 🚀 Ejecución
+## Ejecución
 
 ### Paso 1: Iniciar el agente micro-ROS (en tu PC)
 
@@ -192,7 +192,7 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 
 > **Nota:** El robot frena automáticamente si deja de recibir comandos después de 500ms (CMD_TIMEOUT).
 
-## 🎛️ Valores Finales del PID
+## Valores Finales del PID
 
 | Parámetro | Valor | Descripción |
 |---|---|---|
@@ -215,7 +215,7 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 5. Se agregó un filtro pasa-bajos (alpha=0.15) sobre la velocidad medida para suavizar el ruido eléctrico de los encoders.
 6. Se implementó compensación de zona muerta con PWM mínimo de 60 para garantizar que los motores arranquen.
 
-## 📡 Arquitectura de Comunicación
+## Arquitectura de Comunicación
 
 ```
 ┌──────────────┐     WiFi UDP      ┌──────────────────┐     DDS      ┌──────────┐
@@ -228,7 +228,7 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 - El agente micro-ROS (Docker) actúa como puente entre el ESP32 y la red DDS de ROS 2
 - El flag `--net=host` en Docker permite que el agente comparta la red del host
 
-## ⚠️ Notas Importantes
+## Notas Importantes
 
 - **El ESP32 debe reiniciarse después de reiniciar el agente** para que las entidades se creen correctamente.
 - Si la creación de entidades falla (común por pérdida de paquetes UDP en WiFi), el firmware reintenta automáticamente cada 2 segundos.
