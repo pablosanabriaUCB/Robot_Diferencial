@@ -1,21 +1,6 @@
-/*
- * open_loop_controller.ino
- * 
- * Open-loop differential drive robot using micro-ROS over WiFi.
- * Hardware: ESP32 (30-pin) + TB6612FNG motor driver
- * 
- * This is a simpler version that maps cmd_vel directly to PWM
- * without PID control or encoder feedback.
- * 
- * Features:
- *   - State machine reconnection (no rmw_uros_ping_agent)
- *   - Direct cmd_vel to PWM mapping
- *   - Executor only has subscription (1 handle)
- *   - CMD_TIMEOUT safety stop
- *   - Debug prints
- */
-
+#include <WiFi.h>
 #include <micro_ros_arduino.h>
+
 #include <stdio.h>
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -23,281 +8,354 @@
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
 
-// ============================================================
-// WiFi Configuration
-// ============================================================
-const char* ssid       = "OnLineHS";
-const char* password   = "0202-totines";
-const char* agent_ip   = "10.0.1.154";
-const uint  agent_port = 8888;
+// ==========================================
+// WIFI
+// ==========================================
 
-// ============================================================
-// Motor Driver Pins (TB6612FNG)
-// ============================================================
-#define STBY  26
+char ssid[] = "OnLineHS";
+char password[] = "0202-totines";
 
-#define PWMA  25
-#define AIN1  32
-#define AIN2  33
+char agent_ip[] = "10.0.1.154";
+const uint16_t agent_port = 8888;
 
-#define PWMB  13
-#define BIN1  14
-#define BIN2  12
+// ==========================================
+// PINES DEL HARDWARE
+// ==========================================
 
-// ============================================================
-// Motor Constants
-// ============================================================
-#define MAX_PWM      150   // limit max PWM for open-loop safety
-#define CMD_TIMEOUT  500   // ms before stopping on no cmd_vel
+const int STBY = 26;
 
-// ============================================================
-// PWM Channel Configuration (ESP32 LEDC)
-// ============================================================
-#define PWM_FREQ   5000
-#define PWM_RES    8
-#define PWM_CH_A   0
-#define PWM_CH_B   1
+const int PWMA = 25;
+const int AIN1 = 32;
+const int AIN2 = 33;
 
-// ============================================================
-// micro-ROS State Machine
-// ============================================================
-enum AgentState {
-  WAITING_AGENT,
-  AGENT_AVAILABLE,
-  AGENT_CONNECTED,
-  AGENT_DISCONNECTED
-};
+const int PWMB = 13;
+const int BIN1 = 14;
+const int BIN2 = 12;
 
-AgentState state = WAITING_AGENT;
+// ==========================================
+// PARÁMETROS DEL ROBOT
+// ==========================================
 
-// ============================================================
-// micro-ROS Objects
-// ============================================================
-rcl_allocator_t       allocator;
-rclc_support_t        support;
-rcl_node_t            node;
-rcl_subscription_t    subscriber;
-rclc_executor_t       executor;
+const float WHEEL_BASE = 0.20;
+
+// Ajusta este valor para cambiar velocidad máxima
+// 150 = moderado, 200 = rápido, 100 = lento
+const int MAX_PWM = 150;
+
+// ==========================================
+// SEGURIDAD
+// ==========================================
+
+unsigned long last_cmd_time = 0;
+const unsigned long CMD_TIMEOUT = 500;
+
+// ==========================================
+// micro-ROS
+// ==========================================
+
+rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
 
-// ============================================================
-// Motor Command State
-// ============================================================
-float cmd_linear  = 0.0;
-float cmd_angular = 0.0;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
 
-unsigned long last_cmd_time   = 0;
-unsigned long last_debug_time = 0;
+bool micro_ros_connected = false;
+int spin_fail_count = 0;
 
-// ============================================================
-// cmd_vel Subscription Callback
-// ============================================================
-void cmd_vel_callback(const void* msgin) {
-  const geometry_msgs__msg__Twist* twist = (const geometry_msgs__msg__Twist*)msgin;
+// ==========================================
+// VELOCIDADES
+// ==========================================
 
-  cmd_linear  = twist->linear.x;
-  cmd_angular = twist->angular.z;
+volatile float cmd_linear = 0.0;
+volatile float cmd_angular = 0.0;
+
+// ==========================================
+// CMD_VEL CALLBACK
+// ==========================================
+
+void twist_callback(const void * msgin)
+{
+  const geometry_msgs__msg__Twist * twist_msg =
+      (const geometry_msgs__msg__Twist *)msgin;
+
+  cmd_linear = twist_msg->linear.x;
+  cmd_angular = twist_msg->angular.z;
 
   last_cmd_time = millis();
+
+  Serial.print(">> CMD_VEL: v=");
+  Serial.print(cmd_linear);
+  Serial.print(" w=");
+  Serial.println(cmd_angular);
 }
 
-// ============================================================
-// Motor Control Functions
-// ============================================================
-void set_motor_L(int pwm_val) {
-  if (pwm_val > 0) {
-    digitalWrite(AIN1, HIGH);
-    digitalWrite(AIN2, LOW);
-  } else if (pwm_val < 0) {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, HIGH);
-    pwm_val = -pwm_val;
-  } else {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, LOW);
+// ==========================================
+// MOTOR (open-loop directo)
+// ==========================================
+
+void set_motor(
+    int pwm_val,
+    int pin_in1,
+    int pin_in2,
+    int pin_pwm)
+{
+  if (pwm_val > 0)
+  {
+    digitalWrite(pin_in1, HIGH);
+    digitalWrite(pin_in2, LOW);
+    analogWrite(pin_pwm, pwm_val);
   }
-  if (pwm_val > MAX_PWM) pwm_val = MAX_PWM;
-  ledcWrite(PWM_CH_A, pwm_val);
-}
-
-void set_motor_R(int pwm_val) {
-  if (pwm_val > 0) {
-    digitalWrite(BIN1, HIGH);
-    digitalWrite(BIN2, LOW);
-  } else if (pwm_val < 0) {
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, HIGH);
-    pwm_val = -pwm_val;
-  } else {
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, LOW);
+  else if (pwm_val < 0)
+  {
+    digitalWrite(pin_in1, LOW);
+    digitalWrite(pin_in2, HIGH);
+    analogWrite(pin_pwm, -pwm_val);
   }
-  if (pwm_val > MAX_PWM) pwm_val = MAX_PWM;
-  ledcWrite(PWM_CH_B, pwm_val);
+  else
+  {
+    digitalWrite(pin_in1, LOW);
+    digitalWrite(pin_in2, LOW);
+    analogWrite(pin_pwm, 0);
+  }
 }
 
-void stop_motors() {
-  set_motor_L(0);
-  set_motor_R(0);
-  cmd_linear  = 0.0;
+// ==========================================
+// DETENER MOTORES
+// ==========================================
+
+void stop_motors()
+{
+  cmd_linear = 0.0;
   cmd_angular = 0.0;
+
+  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN2, LOW);
+  analogWrite(PWMA, 0);
+
+  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN2, LOW);
+  analogWrite(PWMB, 0);
 }
 
-// ============================================================
-// Open-Loop Motor Update
-// Maps cmd_vel (linear.x, angular.z) directly to PWM values
-// ============================================================
-void update_motors() {
-  // Map velocity commands directly to PWM
-  int base_pwm = (int)(cmd_linear  * MAX_PWM);
-  int turn_pwm = (int)(cmd_angular * MAX_PWM);
+// ==========================================
+// CONTROL DE MOTORES
+// ==========================================
 
-  // Differential drive mixing
-  int pwm_L = base_pwm - turn_pwm;
-  int pwm_R = base_pwm + turn_pwm;
+void update_motors()
+{
+  // Timeout de seguridad
+  if (millis() - last_cmd_time > CMD_TIMEOUT)
+  {
+    cmd_linear = 0.0;
+    cmd_angular = 0.0;
+  }
 
-  // Clamp to valid range
-  pwm_L = constrain(pwm_L, -MAX_PWM, MAX_PWM);
-  pwm_R = constrain(pwm_R, -MAX_PWM, MAX_PWM);
+  // Mapear directo: linear = ambas ruedas, angular = diferencial
+  int base_pwm = constrain((int)(cmd_linear * MAX_PWM), -MAX_PWM, MAX_PWM);
+  int turn_pwm = constrain((int)(cmd_angular * MAX_PWM), -MAX_PWM, MAX_PWM);
 
-  set_motor_L(pwm_L);
-  set_motor_R(pwm_R);
+  int pwm_L = constrain(base_pwm - turn_pwm, -MAX_PWM, MAX_PWM);
+  int pwm_R = constrain(base_pwm + turn_pwm, -MAX_PWM, MAX_PWM);
+
+  set_motor(pwm_L, AIN1, AIN2, PWMA);
+  set_motor(pwm_R, BIN1, BIN2, PWMB);
+
+  Serial.print("PWM_L=");
+  Serial.print(pwm_L);
+  Serial.print(" PWM_R=");
+  Serial.println(pwm_R);
 }
 
-// ============================================================
-// micro-ROS Lifecycle: Create & Destroy
-// ============================================================
-bool create_entities() {
+// ==========================================
+// CREAR ENTIDADES micro-ROS
+// ==========================================
+
+bool create_entities()
+{
   allocator = rcl_get_default_allocator();
 
-  // Create init options and support
-  rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-  if (rcl_init_options_init(&init_options, allocator) != RCL_RET_OK) return false;
-
-  if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) != RCL_RET_OK) {
-    rcl_init_options_fini(&init_options);
+  Serial.println(">> Creando support...");
+  if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK)
+  {
+    Serial.println("   FALLO");
     return false;
   }
-  rcl_init_options_fini(&init_options);
+  Serial.println("   OK");
+  delay(500);
 
-  // Create node
-  if (rclc_node_init_default(&node, "esp32_openloop_robot", "", &support) != RCL_RET_OK) return false;
+  Serial.println(">> Creando nodo...");
+  if (rclc_node_init_default(&node, "cmd_vel_subscriber", "", &support) != RCL_RET_OK)
+  {
+    Serial.println("   FALLO");
+    return false;
+  }
+  Serial.println("   OK");
+  delay(500);
 
-  // Create subscription to cmd_vel
+  Serial.println(">> Creando suscripcion...");
   if (rclc_subscription_init_default(
-        &subscriber, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "cmd_vel") != RCL_RET_OK) return false;
+          &subscriber,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+          "cmd_vel") != RCL_RET_OK)
+  {
+    Serial.println("   FALLO");
+    return false;
+  }
+  Serial.println("   OK");
+  delay(500);
 
-  // Create executor with 1 handle (subscription only)
-  if (rclc_executor_init(&executor, &support.context, 1, &allocator) != RCL_RET_OK) return false;
+  Serial.println(">> Creando executor...");
+  if (rclc_executor_init(&executor, &support.context, 1, &allocator) != RCL_RET_OK)
+  {
+    Serial.println("   FALLO");
+    return false;
+  }
+  Serial.println("   OK");
+  delay(200);
 
-  if (rclc_executor_add_subscription(
-        &executor, &subscriber, &msg,
-        &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
+  Serial.println(">> Agregando suscripcion...");
+  if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &twist_callback, ON_NEW_DATA) != RCL_RET_OK)
+  {
+    Serial.println("   FALLO");
+    return false;
+  }
+  Serial.println("   OK");
 
-  Serial.println("[uROS] Entities created successfully");
   return true;
 }
 
-void destroy_entities() {
+// ==========================================
+// DESTRUIR ENTIDADES micro-ROS
+// ==========================================
+
+void destroy_entities()
+{
+  Serial.println(">> Destruyendo entidades...");
   rcl_subscription_fini(&subscriber, &node);
   rclc_executor_fini(&executor);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
-  Serial.println("[uROS] Entities destroyed");
+  Serial.println("   Listo");
 }
 
-// ============================================================
-// Setup
-// ============================================================
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\n==============================================");
-  Serial.println(" ESP32 Open-Loop Robot - micro-ROS Controller");
-  Serial.println("==============================================");
+// ==========================================
+// SETUP
+// ==========================================
 
-  // Motor pins
+void setup()
+{
+  Serial.begin(115200);
+  delay(2000);
+
+  // ---- WiFi ----
+
+  set_microros_wifi_transports(
+      ssid,
+      password,
+      agent_ip,
+      agent_port);
+
+  Serial.print("Conectando WiFi");
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi conectado");
+  Serial.print("IP ESP32: ");
+  Serial.println(WiFi.localIP());
+
+  // ---- Pines ----
+
   pinMode(STBY, OUTPUT);
+  digitalWrite(STBY, HIGH);
+
+  pinMode(PWMA, OUTPUT);
   pinMode(AIN1, OUTPUT);
   pinMode(AIN2, OUTPUT);
+
+  pinMode(PWMB, OUTPUT);
   pinMode(BIN1, OUTPUT);
   pinMode(BIN2, OUTPUT);
-  digitalWrite(STBY, HIGH);  // Enable motor driver
 
-  // PWM setup
-  ledcSetup(PWM_CH_A, PWM_FREQ, PWM_RES);
-  ledcSetup(PWM_CH_B, PWM_FREQ, PWM_RES);
-  ledcAttachPin(PWMA, PWM_CH_A);
-  ledcAttachPin(PWMB, PWM_CH_B);
+  // ---- Estado inicial ----
 
-  // micro-ROS WiFi transport
-  set_microros_wifi_transports((char*)ssid, (char*)password,
-                                (char*)agent_ip, agent_port);
+  micro_ros_connected = false;
+  spin_fail_count = 0;
 
-  Serial.printf("[WiFi] Connecting to %s ...\n", ssid);
-  Serial.printf("[uROS] Agent: %s:%d\n", agent_ip, agent_port);
-
-  stop_motors();
-  last_cmd_time   = millis();
-  last_debug_time = millis();
-
-  state = WAITING_AGENT;
+  Serial.println("===========================");
+  Serial.println("Conectando a micro-ROS...");
+  Serial.println("===========================");
 }
 
-// ============================================================
-// Main Loop
-// ============================================================
-void loop() {
-  unsigned long now = millis();
+// ==========================================
+// LOOP
+// ==========================================
 
-  // --- State Machine for micro-ROS connection ---
-  switch (state) {
-    case WAITING_AGENT:
-      // Try to create entities; if it works, agent is available
-      if (create_entities()) {
-        state = AGENT_CONNECTED;
-        Serial.println("[STATE] -> AGENT_CONNECTED");
-      } else {
-        // Wait before retrying
-        delay(500);
-      }
-      break;
+void loop()
+{
+  // ---- CONEXIÓN ----
 
-    case AGENT_CONNECTED:
-      // Spin executor (non-blocking, short timeout)
-      {
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+  if (!micro_ros_connected)
+  {
+    Serial.println(">> Intentando conectar...");
 
-        // Check cmd_vel timeout
-        if ((now - last_cmd_time) > CMD_TIMEOUT) {
-          cmd_linear  = 0.0;
-          cmd_angular = 0.0;
-        }
-
-        // Update motors directly from cmd_vel
-        update_motors();
-
-        // Debug prints every 500ms
-        if ((now - last_debug_time) >= 500) {
-          last_debug_time = now;
-          Serial.printf("[DBG] linear=%.3f angular=%.3f\n",
-                        cmd_linear, cmd_angular);
-        }
-      }
-      break;
-
-    case AGENT_DISCONNECTED:
-      // Clean up and go back to waiting
-      stop_motors();
+    if (create_entities())
+    {
+      Serial.println("===========================");
+      Serial.println("CONECTADO - Robot listo!");
+      Serial.println("===========================");
+      last_cmd_time = millis();
+      micro_ros_connected = true;
+      spin_fail_count = 0;
+    }
+    else
+    {
+      Serial.println(">> Fallo, reintentando en 2s...");
       destroy_entities();
-      state = WAITING_AGENT;
-      Serial.println("[STATE] -> WAITING_AGENT (reconnecting...)");
-      delay(500);
-      break;
+      stop_motors();
+      delay(2000);
+    }
+    return;
+  }
 
-    default:
-      break;
+  // ---- PROCESAR micro-ROS ----
+
+  rcl_ret_t rc = rclc_executor_spin_some(
+      &executor,
+      RCL_MS_TO_NS(10));
+
+  if (rc != RCL_RET_OK)
+  {
+    spin_fail_count++;
+    if (spin_fail_count > 100)
+    {
+      Serial.println(">> Desconexion detectada");
+      destroy_entities();
+      stop_motors();
+      micro_ros_connected = false;
+      spin_fail_count = 0;
+      delay(2000);
+      return;
+    }
+  }
+  else
+  {
+    spin_fail_count = 0;
+  }
+
+  // ---- ACTUALIZAR MOTORES cada 50ms ----
+
+  static unsigned long last_motor_time = 0;
+  if (millis() - last_motor_time >= 50)
+  {
+    last_motor_time = millis();
+    update_motors();
   }
 }
