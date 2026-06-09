@@ -17,6 +17,8 @@ Control de un robot diferencial mediante **micro-ROS** sobre **WiFi (UDP)**, uti
 │   │   └── agent_params.yaml
 │   └── scripts/
 │       └── run_agent.sh
+├── Video/                           # Videos y multimedia
+│   └── video_funcionamiento.mp4     # Video demostrativo
 └── README.md
 ```
 
