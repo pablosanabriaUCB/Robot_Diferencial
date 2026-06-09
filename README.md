@@ -51,7 +51,7 @@ Control de un robot diferencial mediante **micro-ROS** sobre **WiFi (UDP)**, uti
 |---|---|
 | Distancia entre ruedas (WHEEL_BASE) | 0.20 m |
 | Radio de rueda (WHEEL_RADIUS) | 0.02 m |
-| Ticks por revolución | 330 |
+| Ticks por revolución | 150 (calibrado) |
 
 ## 🛠️ Requisitos Previos
 

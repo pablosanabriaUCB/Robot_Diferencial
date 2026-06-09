@@ -57,7 +57,7 @@ const uint  agent_port = 8888;
 // ============================================================
 #define WHEEL_BASE    0.20   // meters (distance between wheels)
 #define WHEEL_RADIUS  0.02   // meters
-#define TICKS_PER_REV 330    // encoder ticks per wheel revolution
+#define TICKS_PER_REV 150    // encoder ticks per wheel revolution (calibrado)
 
 // ============================================================
 // PID Parameters (final tuned values)
